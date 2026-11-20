@@ -1,318 +1,204 @@
-#include <cstdio>
 #include <iostream>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "decode.hpp"
 #include "simulator.hpp"
 
-// Limite de seguridad para "run" (por si el programa nunca termina)
-constexpr uint64_t RUN_LIMIT = 100000000;
-
-static std::string hex8(uint32_t v) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "0x%08X", v);
-    return buf;
-}
-
-// Acepta "0x1000", "4096", "0b101"...
+// Lee un numero en decimal (100) o hexadecimal (0x64)
 static bool parse_num(const std::string& s, uint32_t& out) {
     try {
         size_t used;
-        if (s.size() > 2 && s[0] == '0' && (s[1] == 'b' || s[1] == 'B'))
-            out = std::stoul(s.substr(2), &used, 2), used += 2;
-        else
-            out = std::stoul(s, &used, 0);
+        out = std::stoul(s, &used, 0);
         return used == s.size();
     } catch (...) {
         return false;
     }
 }
 
-// Acepta "x5", "t0", "zero", "fp"
+// Lee un registro de la forma x0..x31
 static int parse_reg(const std::string& s) {
-    if (s.size() >= 2 && s[0] == 'x') {
-        uint32_t n;
-        if (parse_num(s.substr(1), n) && n < 32)
-            return n;
-    }
-    if (s == "fp")
-        return 8;
-    for (int i = 0; i < 32; i++)
-        if (s == REG_NAMES[i])
-            return i;
+    uint32_t r;
+    if (s.size() >= 2 && s[0] == 'x' && parse_num(s.substr(1), r) && r < 32)
+        return r;
     return -1;
 }
 
 static void print_reg(const Simulator& sim, int r) {
-    char buf[96];
-    uint32_t v = sim.get_reg(r);
-    snprintf(buf, sizeof(buf), "x%-2d (%-4s) = 0x%08X  (%d)", r, REG_NAMES[r], v, (int32_t)v);
-    std::cout << buf << "\n";
+    std::cout << "x" << r << " = " << hex(sim.regs[r]) << "  (" << (int32_t)sim.regs[r] << ")\n";
 }
 
 static void print_all_regs(const Simulator& sim) {
-    std::cout << "pc = " << hex8(sim.get_pc()) << "\n";
+    std::cout << "pc = " << hex(sim.pc) << "\n";
     for (int i = 0; i < 8; i++) {
         for (int j = 0; j < 4; j++) {
             int r = i + 8 * j;
-            char buf[48];
-            snprintf(buf, sizeof(buf), "x%-2d %-4s 0x%08X   ", r, REG_NAMES[r], sim.get_reg(r));
-            std::cout << buf;
+            std::string name = "x" + std::to_string(r);
+            std::cout << name << std::string(5 - name.size(), ' ') << hex(sim.regs[r]) << "    ";
         }
         std::cout << "\n";
     }
 }
 
 static void print_instr(const Simulator& sim, uint32_t addr) {
-    uint32_t ins = sim.memory().read32(addr);
-    char buf[48];
-    snprintf(buf, sizeof(buf), "%s %s:  %08X   ", addr == sim.get_pc() ? "=>" : "  ", hex8(addr).c_str(), ins);
-    std::cout << buf << disassemble(ins, addr) << "\n";
+    uint32_t ins = sim.mem.read32(addr);
+    std::cout << (addr == sim.pc ? "=> " : "   ") << hex(addr) << ":  " << hex(ins) << "   "
+              << disassemble(ins, addr) << "\n";
 }
 
-static void print_help() {
-    std::cout << "Comandos:\n"
-                 "  step [n]           Ejecuta 1 (o n) instrucciones\n"
-                 "  run                Ejecuta hasta terminar, un breakpoint o un ebreak\n"
-                 "  pc                 Muestra el PC\n"
-                 "  regs [r1 r2 ...]   Muestra todos los registros o solo los pedidos (x5, a0, sp...)\n"
-                 "  mem <ini> [fin]    Muestra los bytes de memoria de ini a fin (inclusive)\n"
-                 "  memw <dir> [n]     Muestra n palabras de 32 bits desde dir\n"
-                 "  dis [dir] [n]      Desensambla n instrucciones desde dir (por defecto, alrededor del PC)\n"
-                 "  break <dir>        Pone un breakpoint\n"
-                 "  delete <dir>       Quita un breakpoint\n"
-                 "  breaks             Lista los breakpoints\n"
-                 "  reset              Recarga el programa y reinicia el estado\n"
-                 "  load <archivo>     Carga otro programa (.bin crudo o .elf)\n"
-                 "  help               Muestra esta ayuda\n"
-                 "  exit               Sale del simulador\n";
-}
-
-// Ejecuta una instruccion y muestra que hizo (instruccion + registros que cambiaron)
-static bool do_step(Simulator& sim, bool verbose) {
-    uint32_t old_pc = sim.get_pc();
-    uint32_t before[32];
+// Ejecuta una instruccion y muestra que hizo. Devuelve false si hay que detenerse.
+static bool do_step(Simulator& sim, bool show) {
+    uint32_t old_pc = sim.pc;
+    uint32_t old_regs[32];
     for (int i = 0; i < 32; i++)
-        before[i] = sim.get_reg(i);
+        old_regs[i] = sim.regs[i];
 
     try {
         sim.step();
-    } catch (const SimError& e) {
+    } catch (const std::runtime_error& e) {
         std::cout << "Error: " << e.what() << "\n";
         return false;
     }
 
-    if (verbose) {
-        uint32_t ins = sim.memory().read32(old_pc);
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%s:  %08X   ", hex8(old_pc).c_str(), ins);
-        std::cout << buf << disassemble(ins, old_pc);
+    if (show) {
+        uint32_t ins = sim.mem.read32(old_pc);
+        std::cout << hex(old_pc) << ":  " << hex(ins) << "   " << disassemble(ins, old_pc);
         for (int i = 1; i < 32; i++)
-            if (sim.get_reg(i) != before[i])
-                std::cout << "    ; " << REG_NAMES[i] << " = " << hex8(sim.get_reg(i));
+            if (sim.regs[i] != old_regs[i])
+                std::cout << "    ; x" << i << " = " << hex(sim.regs[i]);
         std::cout << "\n";
     }
-    if (sim.is_halted()) {
-        std::cout << "Programa terminado: " << sim.get_halt_reason() << ". (" << sim.get_instr_count()
-                  << " instrucciones ejecutadas)\n";
-        return false;
-    }
-    if (sim.take_ebreak()) {
-        std::cout << "ebreak en " << hex8(old_pc) << "\n";
+
+    if (sim.halted) {
+        std::cout << "Programa terminado: " << sim.halt_reason << " (" << sim.count << " instrucciones ejecutadas)\n";
         return false;
     }
     return true;
 }
 
+static void print_help() {
+    std::cout << "  step [n]          ejecuta 1 (o n) instrucciones\n"
+                 "  run               ejecuta hasta terminar o llegar a un breakpoint\n"
+                 "  pc                muestra el pc\n"
+                 "  regs [x5 x10 ...] muestra todos los registros o solo los indicados\n"
+                 "  mem <ini> [fin]   muestra los bytes de memoria de ini a fin\n"
+                 "  memw <dir> [n]    muestra n palabras de 32 bits desde dir\n"
+                 "  dis [dir] [n]     desensambla n instrucciones desde dir\n"
+                 "  break <dir>       pone un breakpoint\n"
+                 "  delete <dir>      quita un breakpoint\n"
+                 "  reset             recarga el programa\n"
+                 "  exit              sale del simulador\n";
+}
+
 int main(int argc, char** argv) {
-    // Uso: rvsim programa.bin [--echo]
-    // --echo vuelve a imprimir cada comando leido (util cuando los comandos vienen de un pipe)
-    std::string program;
-    bool echo = false;
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "--echo")
-            echo = true;
-        else
-            program = arg;
-    }
-    if (program.empty()) {
-        std::cerr << "Uso: " << argv[0] << " <programa.bin | programa.elf> [--echo]\n";
+    if (argc < 2) {
+        std::cerr << "Uso: " << argv[0] << " <programa.bin | programa.elf>\n";
         return 1;
     }
 
+    std::string program = argv[1];
     Simulator sim;
-    std::string msg;
-    if (!sim.load_file(program, msg)) {
-        std::cerr << msg << "\n";
+    try {
+        std::cout << sim.load(program) << "\n";
+    } catch (const std::runtime_error& e) {
+        std::cerr << e.what() << "\n";
         return 1;
     }
-    std::cout << msg << "\n";
     std::cout << "Escribe \"help\" para ver los comandos.\n";
 
     std::set<uint32_t> breakpoints;
     std::string line;
 
-    while (true) {
-        std::cout << "> " << std::flush;
-        if (!std::getline(std::cin, line))
-            break;
-        if (!line.empty() && line.back() == '\r')  // Windows
-            line.pop_back();
-        if (echo)
-            std::cout << line << "\n";
-
+    while (std::cout << "> " && std::getline(std::cin, line)) {
         std::istringstream ss(line);
         std::vector<std::string> args;
-        std::string tok;
-        while (ss >> tok)
-            args.push_back(tok);
+        std::string word;
+        while (ss >> word)
+            args.push_back(word);
         if (args.empty())
             continue;
-        std::string cmd = args[0];
 
-        if (cmd == "exit" || cmd == "quit" || cmd == "q") {
+        std::string cmd = args[0];
+        uint32_t n1 = 0, n2 = 0;
+        bool has1 = args.size() > 1 && parse_num(args[1], n1);
+        bool has2 = args.size() > 2 && parse_num(args[2], n2);
+
+        if (cmd == "exit") {
             break;
-        } else if (cmd == "help" || cmd == "h") {
+        } else if (cmd == "help") {
             print_help();
-        } else if (cmd == "step" || cmd == "s") {
-            uint32_t n = 1;
-            if (args.size() > 1 && !parse_num(args[1], n)) {
-                std::cout << "Numero invalido.\n";
-                continue;
-            }
+        } else if (cmd == "step") {
+            uint32_t n = has1 ? n1 : 1;
             for (uint32_t i = 0; i < n; i++)
-                if (!do_step(sim, n <= 50))
+                if (!do_step(sim, true))
                     break;
-            if (n > 50)
-                std::cout << "pc = " << hex8(sim.get_pc()) << "\n";
-        } else if (cmd == "run" || cmd == "r") {
-            uint64_t count = 0;
-            while (true) {
-                if (!do_step(sim, false))
-                    break;
-                if (breakpoints.count(sim.get_pc())) {
-                    std::cout << "Breakpoint en " << hex8(sim.get_pc()) << "\n";
-                    print_instr(sim, sim.get_pc());
-                    break;
-                }
-                if (++count >= RUN_LIMIT) {
-                    std::cout << "Se alcanzo el limite de " << RUN_LIMIT << " instrucciones.\n";
+        } else if (cmd == "run") {
+            while (do_step(sim, false)) {
+                if (breakpoints.count(sim.pc)) {
+                    std::cout << "Breakpoint en " << hex(sim.pc) << "\n";
+                    print_instr(sim, sim.pc);
                     break;
                 }
             }
         } else if (cmd == "pc") {
-            std::cout << "pc = " << hex8(sim.get_pc()) << "\n";
-        } else if (cmd == "regs" || cmd == "reg") {
-            if (args.size() == 1) {
+            std::cout << "pc = " << hex(sim.pc) << "\n";
+        } else if (cmd == "regs") {
+            if (args.size() == 1)
                 print_all_regs(sim);
-                continue;
-            }
             for (size_t i = 1; i < args.size(); i++) {
-                if (args[i] == "pc") {
-                    std::cout << "pc = " << hex8(sim.get_pc()) << "\n";
-                    continue;
-                }
                 int r = parse_reg(args[i]);
                 if (r < 0)
-                    std::cout << "Registro desconocido: " << args[i] << "\n";
+                    std::cout << "Registro invalido: " << args[i] << " (usa x0 a x31)\n";
                 else
                     print_reg(sim, r);
             }
         } else if (cmd == "mem") {
-            uint32_t ini, fin;
-            if (args.size() < 2 || !parse_num(args[1], ini)) {
+            uint32_t fin = has2 ? n2 : n1 + 15;
+            if (!has1 || fin < n1) {
                 std::cout << "Uso: mem <ini> [fin]\n";
                 continue;
             }
-            fin = ini + 15;
-            if (args.size() > 2 && !parse_num(args[2], fin)) {
-                std::cout << "Uso: mem <ini> [fin]\n";
-                continue;
-            }
-            if (fin < ini || fin - ini > 4095) {
-                std::cout << "Rango invalido (maximo 4096 bytes).\n";
-                continue;
-            }
-            std::cout << "Memoria (" << hex8(ini) << "-" << hex8(fin) << "):";
-            for (uint32_t addr = ini; ; addr++) {
-                if ((addr - ini) % 16 == 0)
-                    std::cout << "\n  " << hex8(addr) << ":";
+            std::cout << "Memoria (" << hex(n1) << " - " << hex(fin) << "):";
+            for (uint32_t i = 0; i <= fin - n1 && i < 1024; i++) {
+                if (i % 16 == 0)
+                    std::cout << "\n  " << hex(n1 + i) << ":";
                 char buf[8];
-                snprintf(buf, sizeof(buf), " %02X", sim.memory().read8(addr));
+                snprintf(buf, sizeof(buf), " %02X", sim.mem.read8(n1 + i));
                 std::cout << buf;
-                if (addr == fin)
-                    break;
             }
             std::cout << "\n";
         } else if (cmd == "memw") {
-            uint32_t addr, n = 1;
-            if (args.size() < 2 || !parse_num(args[1], addr) || (args.size() > 2 && !parse_num(args[2], n))) {
+            if (!has1) {
                 std::cout << "Uso: memw <dir> [n]\n";
                 continue;
             }
-            for (uint32_t i = 0; i < n && i < 1024; i++) {
-                uint32_t v = sim.memory().read32(addr + 4 * i);
-                char buf[64];
-                snprintf(buf, sizeof(buf), "  %s: 0x%08X  (%d)", hex8(addr + 4 * i).c_str(), v, (int32_t)v);
-                std::cout << buf << "\n";
+            uint32_t n = has2 ? n2 : 1;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t v = sim.mem.read32(n1 + 4 * i);
+                std::cout << "  " << hex(n1 + 4 * i) << ": " << hex(v) << "  (" << (int32_t)v << ")\n";
             }
         } else if (cmd == "dis") {
-            uint32_t addr = sim.get_pc() >= 8 ? sim.get_pc() - 8 : 0, n = 8;
-            if (args.size() > 1 && !parse_num(args[1], addr)) {
-                std::cout << "Uso: dis [dir] [n]\n";
-                continue;
-            }
-            if (args.size() > 2 && !parse_num(args[2], n)) {
-                std::cout << "Uso: dis [dir] [n]\n";
-                continue;
-            }
-            addr &= ~3u;
-            for (uint32_t i = 0; i < n && i < 1024; i++)
+            uint32_t addr = has1 ? n1 : sim.pc;
+            uint32_t n = has2 ? n2 : 8;
+            for (uint32_t i = 0; i < n; i++)
                 print_instr(sim, addr + 4 * i);
-        } else if (cmd == "break" || cmd == "b") {
-            uint32_t addr;
-            if (args.size() < 2 || !parse_num(args[1], addr)) {
-                std::cout << "Uso: break <dir>\n";
-                continue;
-            }
-            breakpoints.insert(addr);
-            std::cout << "Breakpoint en " << hex8(addr) << "\n";
-        } else if (cmd == "delete") {
-            uint32_t addr;
-            if (args.size() < 2 || !parse_num(args[1], addr)) {
-                std::cout << "Uso: delete <dir>\n";
-                continue;
-            }
-            if (breakpoints.erase(addr))
-                std::cout << "Breakpoint eliminado.\n";
-            else
-                std::cout << "No habia un breakpoint ahi.\n";
-        } else if (cmd == "breaks") {
-            if (breakpoints.empty())
-                std::cout << "No hay breakpoints.\n";
-            for (uint32_t addr : breakpoints)
-                std::cout << "  " << hex8(addr) << "\n";
+        } else if (cmd == "break" && has1) {
+            breakpoints.insert(n1);
+            std::cout << "Breakpoint en " << hex(n1) << "\n";
+        } else if (cmd == "delete" && has1) {
+            breakpoints.erase(n1);
+            std::cout << "Breakpoint eliminado\n";
         } else if (cmd == "reset") {
-            sim.load_file(program, msg);
-            std::cout << msg << "\n";
-        } else if (cmd == "load") {
-            if (args.size() < 2) {
-                std::cout << "Uso: load <archivo>\n";
-                continue;
-            }
-            if (sim.load_file(args[1], msg))
-                program = args[1];
-            std::cout << msg << "\n";
+            std::cout << sim.load(program) << "\n";
         } else {
-            std::cout << "Comando desconocido: " << cmd << ". Escribe \"help\".\n";
+            std::cout << "Comando no valido. Escribe \"help\".\n";
         }
     }
 
     std::cout << "See you next time...\n";
-    std::cout << "Program exited with code " << sim.get_exit_code() << ".\n";
-    return sim.get_exit_code();
+    std::cout << "Program exited with code " << sim.exit_code << ".\n";
+    return sim.exit_code;
 }

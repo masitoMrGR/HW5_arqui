@@ -1,31 +1,30 @@
-# suma.s: pide un numero n por teclado e imprime 1 + 2 + ... + n.
-# Sirve para mostrar las ecall de entrada/salida y un bucle.
+# suma.s: pide un numero n por teclado e imprime 1 + 2 + ... + n
 .global _start
 _start:
-    la   a0, msg_pedir
-    li   a7, 4              # print string
+    la   x10, msg_pedir
+    li   x17, 4             # imprimir string
     ecall
-    li   a7, 5              # read int -> a0
+    li   x17, 5             # leer entero -> x10
     ecall
-    mv   t0, a0             # t0 = n
-    li   t1, 0              # t1 = suma
-    li   t2, 1              # t2 = i
+    mv   x5, x10            # x5 = n
+    li   x6, 0              # x6 = suma
+    li   x7, 1              # x7 = i
 loop:
-    blt  t0, t2, fin        # si n < i, terminamos
-    add  t1, t1, t2         # suma += i
-    addi t2, t2, 1          # i++
+    blt  x5, x7, fin        # si n < i, termina
+    add  x6, x6, x7         # suma += i
+    addi x7, x7, 1          # i++
     j    loop
 fin:
-    la   a0, msg_res
-    li   a7, 4
+    la   x10, msg_res
+    li   x17, 4
     ecall
-    mv   a0, t1
-    li   a7, 1              # print int
+    mv   x10, x6
+    li   x17, 1             # imprimir entero
     ecall
-    li   a0, 10
-    li   a7, 11             # print char '\n'
+    li   x10, 10
+    li   x17, 11            # imprimir '\n'
     ecall
-    li   a7, 10             # exit
+    li   x17, 10            # exit
     ecall
 msg_pedir: .asciz "Ingresa un numero: "
 msg_res:   .asciz "La suma de 1 a n es: "
